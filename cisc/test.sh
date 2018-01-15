@@ -2,15 +2,16 @@
 
 DBG_TEST=1
 # Debug-level for app
-DBG_APP=3
-DBG_SRV=3
+DBG_APP=2
+# DBG_SRV=2
 # Needs 4 clients
 NBR=4
 PACKAGE_POP_GO="github.com/dedis/cothority/pop"
-PACKAGE_POP="$GOPATH/src/$PACKAGE_POP_GO"
+PACKAGE_POP="$(go env GOPATH)/src/$PACKAGE_POP_GO"
 pop=`basename $PACKAGE_POP`
 PACKAGE_IDEN="github.com/dedis/cothority/identity"
-. $GOPATH/src/gopkg.in/dedis/onet.v1/app/libtest.sh
+
+. $(go env GOPATH)/src/github.com/dedis/onet/app/libtest.sh
 
 main(){
     startTest
@@ -21,12 +22,11 @@ main(){
     buildKeys
     buildConode github.com/dedis/cothority/cosi/service $PACKAGE_IDEN $PACKAGE_POP_GO/service
     build $PACKAGE_POP
-    createFinal 2
+    createFinal 2 > /dev/null
     createToken 2
 
     test Build
     test Link
-    test LinkPrivate
     test Store
     test Add
     test ClientSetup
@@ -39,6 +39,7 @@ main(){
     test IdDel
     test KeyAdd
     test KeyAdd2
+    test KeyAddWeb
     test KeyDel
     test SSHAdd
     test SSHDel
@@ -155,6 +156,17 @@ testKeyDel(){
     testNGrep key2 runCl 2 kv ls
     testOK runCl 1 config update
     testNGrep key2 runCl 2 kv ls
+}
+
+testKeyAddWeb(){
+  clientSetup 2
+  mkdir dedis
+  echo "<html>DEDIS rocks</html>" > dedis/index.html
+  testOK runCl 1 kv addWeb dedis/index.html
+  testOK runCl 2 config vote y
+  testGrep "html:dedis:index.html" runCl 1 kv list
+  testGrep "DEDIS rocks" runCl 1 kv value "html:dedis:index.html"
+  rm -rf dedis/index.html
 }
 
 testKeyAdd2(){
@@ -313,6 +325,7 @@ testIdCreate2(){
 
     testFail runCl 1 id cr -t Public public.toml $priv
     runAdd 3 $pubs
+    testFail runCl 1 id cr -t Public public.toml
     testOK runCl 1 id cr -t Public public.toml $priv
     testFile cl1/config.bin
     testGrep $(hostname) runCl 1 id cr -t Public public.toml $priv
@@ -386,7 +399,8 @@ testAdd(){
 runLink(){
     local KP
     local i
-    for (( i=1; i<=$1; i++ )); do
+    for (( i=1; i<=$1; i++ ))
+    do
         runCl 1 admin link ${addr[$i]}
         pin=$( grep PIN ${COLOG}$i.log | sed -e "s/.* //" )
         runCl 1 admin link ${addr[$i]} $pin
@@ -394,7 +408,7 @@ runLink(){
 }
 
 testLink(){
-    runCoBG `seq 3`
+    runCoBG `seq 1`
 
     testOK runCl 1 admin link ${addr[1]}
     testGrep PIN cat ${COLOG}1.log
@@ -402,15 +416,6 @@ testLink(){
     testFail runCl 1 admin link ${addr[1]} abcdefg
     testOK runCl 1 admin link ${addr[1]} $pin
     testFile cl1/config.bin
-    testOK runCl 1 id cr public.toml
-}
-
-testLinkPrivate(){
-    runCoBG `seq 3`
-    runCl 1 admin link
-    testFail runCl 1 admin link ${addr[1]} co2/private.toml
-    testOK runCl 1 admin link ${addr[1]} co1/private.toml
-    testOK runCl 1 id cr public.toml
 }
 
 testBuild(){
@@ -510,24 +515,22 @@ createFinal(){
     local pub_user1=$( grep Public $KP | sed -e "s/.* //")
     createPopDesc $1
 
-    rm -rf clpop{1,2}
-    mkdir clpop{1,2}
-    ./$pop -d 4 -c clpop1 org link ${addr[1]}
+    ./$pop -c cl1 org link ${addr[1]}
     local pin=$( grep PIN ${COLOG}1.log | sed -e "s/.* //" )
-    testOK ./$pop -c clpop1 org link ${addr[1]} $pin
+    testOK ./$pop -c cl1 org link ${addr[1]} $pin
 
-    ./$pop -c clpop2 org link ${addr[2]}
+    ./$pop -c cl2 org link ${addr[2]}
     pin=$( grep PIN ${COLOG}2.log | sed -e "s/.* //" )
-    ./$pop -c clpop2 org link ${addr[2]} $pin
+    ./$pop -c cl2 org link ${addr[2]} $pin
 
-    ./$pop -c clpop1 org config pop_desc.toml
-    ./$pop -c clpop2 -d 2 org config pop_desc.toml > pop_hash_file
+    ./$pop -c cl1 org config pop_desc.toml
+    ./$pop -c cl2 -d 2 org config pop_desc.toml > pop_hash_file
     pop_hash=$(grep config: pop_hash_file | sed -e "s/.* //")
-    ./$pop -c clpop1 org public $PUB_USER $pop_hash
-    ./$pop -c clpop2 org public $PUB_USER $pop_hash
-    ./$pop -c clpop1 org public $pub_user1 $pop_hash
-    ./$pop -c clpop2 org public $pub_user1 $pop_hash
-    ./$pop -c clpop1 org final $pop_hash
-    ./$pop -c clpop2 -d 2 org final $pop_hash | tail -n +3 | sed "\$ d" > final.toml
+    ./$pop -c cl1 org public $PUB_USER $pop_hash
+    ./$pop -c cl2 org public $PUB_USER $pop_hash
+    ./$pop -c cl1 org public $pub_user1 $pop_hash
+    ./$pop -c cl2 org public $pub_user1 $pop_hash
+    ./$pop -c cl1 org final $pop_hash
+    DEBUG_COLOR="" ./$pop -c cl2 -d 2 org final $pop_hash | tail -n +3> final.toml
 }
 main

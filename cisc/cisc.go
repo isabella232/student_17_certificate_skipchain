@@ -8,36 +8,28 @@ holds the skipchain and answers to requests from the cisc-binary.
 package main
 
 import (
-	"os"
-
+	"bytes"
 	"encoding/hex"
-
-	"path"
-
+	"errors"
+	"fmt"
 	"io/ioutil"
+	"net"
+	"os"
+	"path"
 	"strings"
 
-	"bytes"
-	"net"
-
-	"fmt"
-
-	"strconv"
-
-	"errors"
-
-	"github.com/BurntSushi/toml"
+	"github.com/dedis/cothority"
 	"github.com/dedis/cothority/identity"
 	"github.com/dedis/cothority/pop/service"
+	"github.com/dedis/kyber"
+	"github.com/dedis/kyber/sign/schnorr"
+	"github.com/dedis/kyber/util/encoding"
+	"github.com/dedis/kyber/util/key"
+	"github.com/dedis/onet"
+	"github.com/dedis/onet/app"
+	"github.com/dedis/onet/log"
+	"github.com/dedis/onet/network"
 	"github.com/qantik/qrgo"
-	"gopkg.in/dedis/crypto.v0/abstract"
-	"gopkg.in/dedis/crypto.v0/config"
-	"gopkg.in/dedis/crypto.v0/random"
-	"gopkg.in/dedis/onet.v1"
-	"gopkg.in/dedis/onet.v1/app"
-	"gopkg.in/dedis/onet.v1/crypto"
-	"gopkg.in/dedis/onet.v1/log"
-	"gopkg.in/dedis/onet.v1/network"
 	"gopkg.in/urfave/cli.v1"
 )
 
@@ -76,7 +68,7 @@ func main() {
 		log.SetDebugVisible(c.Int("debug"))
 		return nil
 	}
-	app.Run(os.Args)
+	log.ErrFatal(app.Run(os.Args))
 }
 
 /*
@@ -99,47 +91,36 @@ func adminLink(c *cli.Context) error {
 	addr := network.NewTCPAddress(fmt.Sprintf("%s:%s", addrs[0], port))
 	si := &network.ServerIdentity{Address: addr}
 
+	pin := c.Args().Get(1)
+
 	cfg := loadConfigAdminOrFail(c)
 
-	ckp := config.NewKeyPair(network.Suite)
-	kp := &keyPair{
-		Public:  ckp.Public,
-		Private: ckp.Secret,
+	public := cothority.Suite.Point().Null()
+	var found = true
+	var kp *keyPair
+	if pin != "" {
+		kp, found = cfg.KeyPairs[string(addr)]
+		if !found {
+			ckp := key.NewKeyPair(cothority.Suite)
+			kp = &keyPair{}
+			kp.Public = ckp.Public
+			kp.Private = ckp.Private
+		}
+		public = kp.Public
 	}
-
-	pinOrPrivate := c.Args().Get(1)
-	_, err = strconv.Atoi(pinOrPrivate)
-	if pinOrPrivate == "" || err == nil {
-		pin := pinOrPrivate
-
-		if err := cfg.Identity.RequestLinkPIN(si, pin, kp.Public); err != nil {
-			if err.ErrorCode() == identity.ErrorWrongPIN && pin == "" {
-				log.Info("Please read PIN in server-log")
-				return nil
-			}
-			return err
+	client := onet.NewClient(identity.ServiceName, cothority.Suite)
+	if err := client.SendProtobuf(si, &identity.PinRequest{PIN: pin, Public: public}, nil); err != nil {
+		if err.ErrorCode() == identity.ErrorWrongPIN && pin == "" {
+			log.Info("Please read PIN in server-log")
+			return nil
 		}
-		log.Info("Successfully linked with", addr)
-	} else if _, err := os.Stat(pinOrPrivate); err == nil {
-		hc := &app.CothorityConfig{}
-		_, err := toml.DecodeFile(pinOrPrivate, hc)
-		if err != nil {
-			return err
-		}
-		// Get the secret key
-		secret, err := crypto.StringHexToScalar(network.Suite, hc.Private)
-		if err != nil {
-			return err
-		}
-		if err := cfg.Identity.RequestLinkPrivate(si, secret, kp.Public); err != nil {
-			return err
-		}
-	} else {
-		return errors.New("not valid pin nor valid private-key file")
+		return err
 	}
-
+	log.Info("Successfully linked with", addr)
 	// storing keys only if successfully linked
-	cfg.KeyPairs[string(addr)] = kp
+	if !found {
+		cfg.KeyPairs[string(addr)] = kp
+	}
 	cfg.saveConfig(c)
 	return nil
 }
@@ -165,7 +146,7 @@ func adminStore(c *cli.Context) error {
 		log.Fatal("not linked")
 	}
 
-	client := onet.NewClient(identity.ServiceName)
+	client := onet.NewClient(identity.ServiceName, cothority.Suite)
 
 	finalName := c.Args().First()
 	buf, err := ioutil.ReadFile(finalName)
@@ -181,7 +162,7 @@ func adminStore(c *cli.Context) error {
 		log.Error("error while Hashing")
 		return err
 	}
-	sig, err := crypto.SignSchnorr(network.Suite, kp.Private, hash)
+	sig, err := schnorr.Sign(cothority.Suite, kp.Private, hash)
 	if err != nil {
 		return err
 	}
@@ -215,7 +196,7 @@ func adminAdd(c *cli.Context) error {
 		log.Fatal("not linked")
 	}
 
-	client := onet.NewClient(identity.ServiceName)
+	client := onet.NewClient(identity.ServiceName, cothority.Suite)
 
 	// keys processing
 	str := c.Args().First()
@@ -229,10 +210,10 @@ func adminAdd(c *cli.Context) error {
 	log.Lvl3("Niceified public keys are:\n", str)
 	keys := strings.Split(str, ",")
 
-	h := network.Suite.Hash()
-	pubs := make([]abstract.Point, len(keys))
+	h := cothority.Suite.Hash()
+	pubs := make([]kyber.Point, len(keys))
 	for i, k := range keys {
-		pub, err := crypto.String64ToPoint(network.Suite, k)
+		pub, err := encoding.StringHexToPoint(cothority.Suite, k)
 		if err != nil {
 			log.Error("Couldn't parse public key:", k)
 			return err
@@ -251,7 +232,7 @@ func adminAdd(c *cli.Context) error {
 	}
 	hash := h.Sum(nil)
 
-	sig, err := crypto.SignSchnorr(network.Suite, kp.Private, hash)
+	sig, err := schnorr.Sign(cothority.Suite, kp.Private, hash)
 	if err != nil {
 		return err
 	}
@@ -269,74 +250,55 @@ func adminAdd(c *cli.Context) error {
  */
 
 func idKeyPair(c *cli.Context) error {
-	priv := network.Suite.NewKey(random.Stream)
-	pub := network.Suite.Point().Mul(nil, priv)
-	privStr, err := crypto.ScalarToString64(nil, priv)
+	kp := key.NewKeyPair(cothority.Suite)
+
+	secStr, err := encoding.ScalarToStringHex(nil, kp.Private)
 	if err != nil {
 		return err
 	}
-	pubStr, err := crypto.PointToString64(nil, pub)
+	pubStr, err := encoding.PointToStringHex(nil, kp.Public)
 	if err != nil {
 		return err
 	}
-	log.Printf("Private: %s\nPublic: %s", privStr, pubStr)
+	log.Printf("Private: %s\nPublic: %s", secStr, pubStr)
 	return nil
 }
 
 func idCreate(c *cli.Context) error {
-	cfg, hasConfig := loadConfig(c)
 	log.Info("Creating id")
-	if c.NArg() < 1 {
-		log.Fatal("Please give a group-definition and optionally an auth data")
+	if c.NArg() < 2 {
+		log.Fatal("Please give a group-definition and auth data")
 	}
 
 	group := getGroup(c)
 	t := c.String("type")
-	var atts []abstract.Point
-	kp := &config.KeyPair{}
+	var atts []kyber.Point
+	kp := &key.Pair{}
 
 	var typ identity.AuthType
-	var leader *network.ServerIdentity
-	switch strings.ToLower(t) {
-	case "pop":
+	switch t {
+	case "PoP":
 		typ = identity.PoPAuth
 		finalName := c.Args().Get(1)
 		buf, err := ioutil.ReadFile(finalName)
 		log.ErrFatal(err)
 		token, err := service.NewPopTokenFromToml(buf)
 		kp.Public = token.Public
-		kp.Secret = token.Private
+		kp.Private = token.Private
 		atts = token.Final.Attendees
 		if err != nil {
 			return err
 		}
-	case "public":
+	case "Public":
 		typ = identity.PublicAuth
-		if c.NArg() > 1 {
-			priv := c.Args().Get(1)
-			var err error
-			kp.Secret, err = crypto.String64ToScalar(network.Suite, priv)
-			if err != nil {
-				log.Error("Couldn't parse private key")
-				return err
-			}
-		} else if !hasConfig {
-			log.Fatal("Please give a private key")
-		} else {
-			for _, si := range group.Roster.List {
-				if kpStored := cfg.KeyPairs[string(si.Address)]; kpStored != nil {
-					log.Lvl1("Found keypair for host", si)
-					kp.Secret = kpStored.Private
-					leader = si
-					break
-				}
-			}
-			if kp.Secret == nil {
-				log.Fatalf("Did not find a keypair for any host in %v in map of %+v",
-					group.Roster.List, cfg.KeyPairs)
-			}
+		priv := c.Args().Get(1)
+		var err error
+		kp.Private, err = encoding.StringHexToScalar(cothority.Suite, priv)
+		if err != nil {
+			log.Error("Couldn't parse private key")
+			return err
 		}
-		kp.Public = network.Suite.Point().Mul(nil, kp.Secret)
+		kp.Public = cothority.Suite.Point().Mul(kp.Private, nil)
 	default:
 		log.Fatal("no such auth method")
 	}
@@ -349,8 +311,8 @@ func idCreate(c *cli.Context) error {
 	log.Info("Creating new blockchain-identity for", name)
 
 	thr := c.Int("threshold")
-	cfg.Identity = identity.NewIdentity(group.Roster, thr, name, kp)
-	log.ErrFatal(cfg.CreateIdentity(typ, atts, leader))
+	cfg := newCiscConfig(identity.NewIdentity(group.Roster, thr, name, kp))
+	log.ErrFatal(cfg.CreateIdentity(typ, atts))
 	log.Infof("IC is %x", cfg.ID)
 	return cfg.saveConfig(c)
 }
@@ -454,14 +416,10 @@ func configVote(c *cli.Context) error {
 	cfg := loadConfigOrFail(c)
 	log.ErrFatal(cfg.DataUpdate())
 	log.ErrFatal(cfg.ProposeUpdate())
-	
 	if cfg.Proposed == nil {
 		log.Info("No proposed config")
 		return nil
 	}
-	
-	
-	
 	if c.NArg() == 0 {
 		cfg.showDifference()
 		if !app.InputYN(true, "Do you want to accept the changes") {
@@ -487,7 +445,16 @@ func kvList(c *cli.Context) error {
 	return nil
 }
 func kvValue(c *cli.Context) error {
-	log.Fatal("Not yet implemented")
+	if c.NArg() < 1 {
+		return errors.New("please give key to search")
+	}
+	cfg := loadConfigOrFail(c)
+	value, ok := cfg.Data.Storage[c.Args().First()]
+	if ok {
+		log.Info("Data[%s] = %s", c.Args().First(), value)
+	} else {
+		log.Info("Key '%s' does not exist")
+	}
 	return nil
 }
 func kvAdd(c *cli.Context) error {
@@ -497,10 +464,6 @@ func kvAdd(c *cli.Context) error {
 	}
 	key := c.Args().Get(0)
 	value := c.Args().Get(1)
-	//(Newly added)force user to use cert add command to add cert
-	if isCert(value){
-		log.Fatal("Use Command 'cert add' to add a pem certificate file")
-	}
 	prop := cfg.GetProposed()
 	prop.Storage[key] = value
 	cfg.proposeSendVoteUpdate(prop)
@@ -520,7 +483,26 @@ func kvDel(c *cli.Context) error {
 	cfg.proposeSendVoteUpdate(prop)
 	return cfg.saveConfig(c)
 }
-
+func kvAddWeb(c *cli.Context) error {
+	if c.NArg() < 1 {
+		return errors.New("Please give an html file to add")
+	}
+	if c.Bool("inline") {
+		return errors.New("Not implemented yet")
+		// https://github.com/remy/inliner
+	}
+	cfg := loadConfigOrFail(c)
+	name := c.Args().First()
+	log.Info("Reading file", name)
+	data, err := ioutil.ReadFile(name)
+	if err != nil {
+		return nil
+	}
+	prop := cfg.GetProposed()
+	prop.Storage["html:"+path.Dir(name)+":"+path.Base(name)] = string(data)
+	cfg.proposeSendVoteUpdate(prop)
+	return cfg.saveConfig(c)
+}
 /*
 *(Newly added)command related to the certificate store/retreve
 */

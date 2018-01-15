@@ -57,8 +57,7 @@ func init() {
 					},
 					cli.StringFlag{
 						Name:  "type,t",
-						Usage: "type of client authentication: pop, public",
-						Value: "public",
+						Usage: "type of client authentication: PoP, PIN",
 					},
 					cli.StringFlag{
 						Name:  "cred,credentials",
@@ -165,6 +164,19 @@ func init() {
 				Usage:     "add a new key/value pair",
 				ArgsUsage: "key value",
 				Action:    kvAdd,
+			},
+			{
+				Name:      "addWeb",
+				Usage:     "add a web-site to a skipchain",
+				Aliases:   []string{"a"},
+				ArgsUsage: "path/page.html",
+				Action:    kvAddWeb,
+				Flags: []cli.Flag{
+					cli.BoolFlag{
+						Name:  "inline",
+						Usage: "inline all images, css and scripts",
+					},
+				},
 			},
 			{
 				Name:      "del",
